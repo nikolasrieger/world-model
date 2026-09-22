@@ -1,0 +1,31 @@
+[project]
+name = "world-model"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Nikolas Rieger", email = "nikolas.rieger@tum.de" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "ale-py>=0.12.1",
+    "gymnasium>=0.29",
+    "numpy>=1.26",
+    "pillow>=11",
+    "torch>=2.14.0",
+]
+
+[project.scripts]
+world-model = "src.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.uv.build-backend]
+module-name = "src"
+module-root = ""

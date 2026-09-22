@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+dist/
+TODO
+*.gif
+pending/
+artifacts/
