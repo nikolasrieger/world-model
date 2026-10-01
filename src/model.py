@@ -28,9 +28,9 @@ class StateMLP(nn.Module):
 
     @classmethod
     def load(cls, path, device):
-        checkpoint = torch.load(path, map_location=device, weights_only=True)
-        _, _, hidden = checkpoint["dimensions"]
+        ckpt = torch.load(path, map_location=device, weights_only=True)
+        _, _, hidden = ckpt["dimensions"]
         model = cls(hidden).to(device)
-        weights = {k: v for k, v in checkpoint["weights"].items() if not k.startswith("outcome_net.")}
+        weights = {k: v for k, v in ckpt["weights"].items() if not k.startswith("outcome_net.")}
         model.load_state_dict(weights)
         return model.eval()
