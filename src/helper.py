@@ -50,11 +50,12 @@ def latent_gif(args, ckpt):
     from .adapters import LatentAdapter
     from .latent import LatentModel
     from .latent_training import frame
+    from .envs.pixels import PixelPongEnv
 
     model = LatentModel.load(ckpt, args.device).eval()
     history = args.history or ckpt['history']
     adapter = LatentAdapter(model, torch.Generator().manual_seed(args.seed))
-    env, rng = PongEnv(render_mode='rgb_array'), np.random.default_rng(args.seed)
+    env, rng = PixelPongEnv(), np.random.default_rng(args.seed)
     frames = []
     try:
         env.reset(seed=args.seed)

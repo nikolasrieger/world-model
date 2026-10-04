@@ -10,6 +10,7 @@ dependencies = [
     "ale-py>=0.12.1",
     "gymnasium>=0.29",
     "numpy>=1.26",
+    "opencv-python-headless>=5.0.0.93",
     "pillow>=11",
     "torch>=2.14.0",
 ]

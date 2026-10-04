@@ -1,25 +1,22 @@
-"""Pixel episode caching and sequence training for the compact latent model."""
+"""Atari pixel caching and joint discrete RSSM sequence training."""
 from pathlib import Path
 from time import perf_counter
 
 import numpy as np
 import torch
-from PIL import Image
 from torch.nn import functional as F
 
-from .envs import PongEnv
-from .envs.pong import CONFIG
+from .envs.pixels import PixelPongEnv, PIXEL_CONFIG as CONFIG
 from .latent import LatentModel, noise_sequence
 from .adapters import check_action
 
 
 def frame(env):
-    image = Image.fromarray(env.render()).convert('L').resize((64, 64), Image.Resampling.BILINEAR)
-    return torch.from_numpy(np.array(image, copy=True))[None]
+    return env.frame()
 
 
 def collect_pixels(count, seed):
-    env, rng = PongEnv(render_mode='rgb_array'), np.random.default_rng(seed)
+    env, rng = PixelPongEnv(), np.random.default_rng(seed)
     episodes, total = [], 0
     try:
         env.reset(seed=seed)
@@ -54,8 +51,6 @@ def pixel_dataset(args):
     path = Path(args.data)
     if path.exists():
         data = torch.load(path, map_location='cpu', weights_only=True)
-        if data.get('kind') != 'pixels64' or data.get('config') != CONFIG:
-            raise ValueError('Latent training needs a pixels64 cache, not the RAM dataset; choose another --data path.')
         if not args.collect_more:
             print(f'Reusing pixel episodes from {path}; no collection.', flush=True)
             return data
@@ -67,7 +62,7 @@ def pixel_dataset(args):
         if args.collect_more:
             raise ValueError('--collect-more requires an existing pixel cache.')
         print(f'Collecting at least {args.samples} training transitions as 64x64 grayscale images...', flush=True)
-        data = dict(version=1, kind='pixels64', config=CONFIG, collection_seeds=[args.seed, args.seed+10000],
+        data = dict(kind='pixels64', config=CONFIG, collection_seeds=[args.seed, args.seed+10000],
                     train=collect_pixels(args.samples, args.seed),
                     val=collect_pixels(max(256, args.samples//5), args.seed+10000))
     save_file(data, path)
@@ -97,16 +92,14 @@ class Windows:
         return images.float()/255., actions, rewards, terminals
 
 
-def kl_divergence(posterior, prior):
-    q, p = posterior['distr'], prior['distr']
+def kl_divergence(posterior, prior, free_nats=0.):
+    q, p = posterior['distr']['logits'], prior['distr']['logits']
 
-    def divergence(q_mean, q_std, p_mean, p_std):
-        value = (p_std.log() - q_std.log() + (q_std.square() + (q_mean-p_mean).square())/(2*p_std.square()) - .5)
-        return value.mean().clamp_min(.1)
+    def divergence(q, p):
+        logq, logp = q.log_softmax(-1), p.log_softmax(-1)
+        return (logq.exp() * (logq - logp)).sum((-1, -2)).clamp_min(free_nats).mean()
 
-    dyn = divergence(q['mean'].detach(), q['std'].detach(), p['mean'], p['std'])
-    repr = divergence(q['mean'], q['std'], p['mean'].detach(), p['std'].detach())
-    return .8*dyn + .2*repr
+    return .8 * divergence(q.detach(), p) + .2 * divergence(q, p.detach())
 
 
 def motion_mse(pred, target, prev):
@@ -140,38 +133,32 @@ def image_loss(pred, target, prev):
     return (pred - target).square().mean() + 2 * motion_mae(pred, target, prev)
 
 
-def loss(model, batch, history, generator):
+def loss(model, batch, history, generator, return_metrics=False, free_nats=0.):
     images, actions, rewards, terminals = batch
     size, time = images.shape[:2]
-    device = images.device
-    h = torch.zeros(size, model.hidden, device=device)
-    noises = iter(noise_sequence(2*time - 1 + time - history, size, model.latent, device, generator))
-    state = model.posterior(h, images[:, 0], noise=next(noises))
-    recon = image_loss(model.observe(state), images[:, 0], images[:, 1])
-    kl, heads = h.sum(), h.sum()
-    context_state = state if history == 1 else None
-    for t in range(1, time):
-        prior = model.prior(state, actions[:, t-1], noise=next(noises), validate=False)
-        state = model.posterior(prior['h'], images[:, t], noise=next(noises))
-        kl = kl + kl_divergence(state, prior)
-        recon = recon + image_loss(model.observe(state), images[:, t], images[:, t-1])
-        logits = model.heads(model.features(state))
-        heads = heads + F.cross_entropy(logits[:, :3], rewards[:, t-1])
-        heads = heads + F.binary_cross_entropy_with_logits(logits[:, 3], terminals[:, t-1])
-        if t == history - 1:
-            context_state = state
-
-    imagined, rollout, outcome_loss = context_state, h.sum(), h.sum()
-    for t in range(history, time):
-        imagined = model.prior(imagined, actions[:, t-1], noise=next(noises), validate=False)
-        pred = model.observe(imagined)
-        rollout = rollout + image_loss(pred, images[:, t], images[:, t-1])
-        logits = model.heads(model.features(imagined))
-        outcome_loss = outcome_loss + F.cross_entropy(logits[:, :3], rewards[:, t-1])
-        outcome_loss = outcome_loss + F.binary_cross_entropy_with_logits(logits[:, 3], terminals[:, t-1])
-    horizon = time - history
-    total = recon/time + rollout/horizon + .01*kl/(time-1)
-    return total + .1*(heads/(time-1) + outcome_loss/horizon)
+    embeds = model.encoder(images.flatten(0, 1) - .5).reshape(size, time, -1)
+    noises = noise_sequence(time, size, model.latent, images.device, generator)
+    h = model.start_hidden(size)
+    features, kls = [], []
+    for t in range(time):
+        if t:
+            h = model.transition(state, actions[:, t-1], validate=False)
+        prior = dict(distr=dict(logits=model.prior_net(h).reshape(size, model.stoch, model.classes)))
+        state = model.posterior_embed(h, embeds[:, t], noises[t])
+        kls.append(kl_divergence(state, prior, free_nats))
+        features.append(model.features(state))
+    features = torch.stack(features, 1)
+    decoded = model.decoder(features.flatten(0, 1)).reshape_as(images)
+    # Negative log likelihood of unit-variance Normal
+    recon = .5 * (decoded-images).square().flatten(2).sum(-1).mean()
+    values = model.heads(features[:, 1:].flatten(0, 1)).reshape(size, time-1, 2)
+    reward = .5 * (values[..., 0] - (rewards.float()-1).tanh()).square().mean()
+    terminal = F.binary_cross_entropy_with_logits(values[..., 1], terminals)
+    kl = torch.stack(kls).mean()
+    total = recon + .1 * kl + reward + 5 * terminal
+    if return_metrics:
+        return total, dict(recon=recon.detach(), kl=kl.detach(), reward=reward.detach(), terminal=terminal.detach())
+    return total
 
 
 @torch.no_grad()
@@ -204,8 +191,8 @@ def evaluate(model, windows, args):
             totals['posterior_mse'] += (recon-target).square().mean()*len(indices)
             totals['posterior_motion_mse'] += motion_mse(recon, target, prev)*len(indices)
             logits = model.heads(model.features(state))
-            totals['reward_accuracy'] += (logits[:, :3].argmax(-1)==rewards[:, t-1]).float().sum()
-            totals['terminal_accuracy'] += ((logits[:, 3]>=0)==terminals[:, t-1].bool()).float().sum()
+            totals['reward_accuracy'] += ((logits[:, 0] / torch.tanh(logits.new_tensor(1.))).round().clamp(-1, 1)==rewards[:, t-1]-1).float().sum()
+            totals['terminal_accuracy'] += ((logits[:, 1]>=0)==terminals[:, t-1].bool()).float().sum()
     values = torch.stack(list(totals.values())).cpu().tolist()
     return {key: value/(len(windows)*args.horizon) for key, value in zip(totals, values)}
 
@@ -213,14 +200,12 @@ def evaluate(model, windows, args):
 def train_latent(args):
     torch.manual_seed(args.seed)
     ckpt = torch.load(args.resume, map_location='cpu', weights_only=True) if args.resume else None
-    model = LatentModel.load(ckpt, args.device) if ckpt else LatentModel(arch=args.arch).to(args.device)
+    model = LatentModel.load(ckpt, args.device) if ckpt else LatentModel().to(args.device)
     data = pixel_dataset(args)
-    train = Windows(data['train'], args.history, args.horizon)
+    train = Windows(data['train'], 1, args.sequence_length - 1)
     val = Windows(data['val'], args.history, args.horizon)
-    if not len(train) or not len(val):
-        raise ValueError("Training and validation data must contain at least one complete window.")
-    lr = 3e-4
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    lr = 2e-4
+    opt = torch.optim.Adam(model.parameters(), lr=lr, eps=1e-5)
     sampling = torch.Generator().manual_seed(args.seed)
     shuffle = torch.Generator().manual_seed(args.seed+1)
     start_epoch = 0
@@ -231,14 +216,18 @@ def train_latent(args):
         sampling.set_state(ckpt['sampling_rng'])
         shuffle.set_state(ckpt['shuffle_rng'])
         start_epoch = ckpt['epoch']
-    print(f'Latent model ({model.arch}): {sum(p.numel() for p in model.parameters()):,} parameters, {len(train)} training windows; history={args.history}, horizon={args.horizon}.', flush=True)
+    print(f'Latent model: {sum(p.numel() for p in model.parameters()):,} parameters, {len(train)} training windows; sequence={args.sequence_length}, history={args.history}, horizon={args.horizon}.', flush=True)
 
-    def save(epoch, metrics):
-        save_file(dict(version=1, model_type='latent', model_config=model.config, weights=model.state_dict(), opt=opt.state_dict(), sampling_rng=sampling.get_state(), shuffle_rng=shuffle.get_state(), epoch=epoch, history=args.history, horizon=args.horizon, data=str(args.data), metrics=metrics), args.output)
+    def save(epoch, metrics, path=None):
+        save_file(dict(updates=updates, model_type='latent', model_config=model.config, weights=model.state_dict(), opt=opt.state_dict(), sampling_rng=sampling.get_state(), shuffle_rng=shuffle.get_state(), epoch=epoch, history=args.history, horizon=args.horizon, sequence_length=args.sequence_length, free_nats=args.free_nats, data=str(args.data), metrics=metrics), path or args.output)
 
     def score(metrics):
-        return metrics['rollout_mse'] + 2*metrics.get('motion_mae', 0.)
+        return metrics['rollout_mse']
 
+    if args.val_windows and len(val) > args.val_windows:
+        val.indices = [val.indices[i] for i in torch.linspace(0, len(val)-1, args.val_windows).long()]
+    updates = ckpt.get('updates', 0) if ckpt else 0
+    run_updates = 0
     best = float('inf')
     if ckpt:
         metrics = evaluate(model.eval(), val, args)
@@ -250,26 +239,41 @@ def train_latent(args):
         started = last_report = perf_counter()
         batches = torch.randperm(len(train), generator=shuffle).split(args.batch_size)
         for step, indices in enumerate(batches, 1):
-            obj = loss(model, train.batch(indices, args.device), args.history, sampling)
+            obj, components = loss(model, train.batch(indices, args.device), args.history, sampling, return_metrics=True, free_nats=args.free_nats)
             if not torch.isfinite(obj):
                 raise RuntimeError('Nonfinite latent training loss.')
             opt.zero_grad()
             obj.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 100.)
             opt.step()
+            updates += 1
+            run_updates += 1
             train_loss += obj.detach()*len(indices)
             if step == 1 or step == len(batches) or perf_counter() - last_report >= 10:
                 if str(args.device).startswith('mps'):
                     torch.mps.synchronize()
                 elapsed = perf_counter() - started
                 print(f"epoch {epoch}: batch {step}/{len(batches)}, "
-                      f"{elapsed/step:.3f}s/batch, train ETA {elapsed/step*(len(batches)-step):.0f}s", flush=True)
+                      f"{elapsed/step:.3f}s/batch, updates={updates}, losses={ {k: round(v.item(), 4) for k, v in components.items()} }", flush=True)
                 last_report = perf_counter()
+            if args.eval_every and updates % args.eval_every == 0:
+                metrics = evaluate(model.eval(), val, args)
+                print(f"update {updates}: val={metrics}", flush=True)
+                if score(metrics) < best:
+                    best = score(metrics)
+                    save(epoch, metrics)
+                model.train()
+            if args.max_updates and run_updates >= args.max_updates:
+                break
         print(f"epoch {epoch}: validating {len(val)} windows...", flush=True)
         metrics = evaluate(model.eval(), val, args)
-        print(f"epoch {epoch}: loss={train_loss/len(train):.5f}, val={metrics}", flush=True)
+        print(f"epoch {epoch}: loss={train_loss/min(len(train), step*args.batch_size):.5f}, val={metrics}", flush=True)
+        output = Path(args.output)
+        save(epoch, metrics, output.with_name(output.stem + "-last" + output.suffix))
         val_score = score(metrics)
         if val_score < best:
             best = val_score
             save(epoch, metrics)
+        if args.max_updates and run_updates >= args.max_updates:
+            break
     print(f'Saved best latent ckpt to {args.output}.', flush=True)

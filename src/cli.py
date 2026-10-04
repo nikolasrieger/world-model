@@ -42,7 +42,7 @@ def dataset(args):
         saved["train"].extend(collect(args.collect_more, seed))
         saved["collection_seeds"] = [*used, seed]
     else:
-        saved = {"version": 1, "config": CONFIG, "seed": args.seed,
+        saved = {"config": CONFIG, "seed": args.seed,
                  "train": collect(args.samples, args.seed),
                  "val": collect(max(256, args.samples // 5), args.seed + 10000)}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +98,7 @@ def train(args):
         return total / len(val[3])
 
     def save(epoch, mse):
-        payload = {"version": 3, "env_name": "pong", "dimensions": (128, 6, model.net[0].out_features),
+        payload = {"env_name": "pong", "dimensions": (128, 6, model.net[0].out_features),
                    "weights": model.state_dict(), "opt": opt.state_dict(),
                    "rng_state": torch.get_rng_state(), "epoch": epoch, "val_mse": mse,
                    "horizon": args.horizon, "data": str(args.data)}
@@ -132,8 +132,14 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     fit = commands.add_parser("train")
     fit.add_argument("--model", choices=("mlp", "latent"), default="mlp")
-    fit.add_argument("--arch", choices=("spatial", "dense"), default="spatial")
-    fit.add_argument("--history", type=int, default=4)
+    fit.add_argument("--output")
+    fit.add_argument("--data")
+    fit.add_argument("--history", type=int, default=5)
+    fit.add_argument("--sequence-length", type=int, default=50)
+    fit.add_argument("--free-nats", type=float, default=0.)
+    fit.add_argument("--eval-every", type=int, default=250)
+    fit.add_argument("--max-updates", type=int)
+    fit.add_argument("--val-windows", type=int, default=128)
     fit.add_argument("--samples", type=int, default=100000)
     fit.add_argument("--resume")
     fit.add_argument("--collect-more", type=int, default=0, metavar="N")
@@ -144,7 +150,7 @@ def main():
     render.add_argument("--ckpt")
     render.add_argument("--output")
     render.add_argument("--mode", choices=("open-loop", "one-step"), default="open-loop")
-    render.add_argument("--history", type=int, default=4)
+    render.add_argument("--history", type=int)
     for command in (fit, render):
         command.add_argument("--device", choices=("cpu", "mps"), default="cpu")
         command.add_argument("--seed", type=int, default=0)
@@ -161,10 +167,10 @@ def main():
         kind = ckpt.get("model_type", "mlp")
         args.model = kind
     latent = args.model == "latent"
-    args.data = ckpt.get("data") or ("artifacts/pong-pixels.pt" if latent else "artifacts/pong-episodes.pt")
-    args.output = ("artifacts/pong-latent.pt" if latent else "artifacts/pong.pt")
+    args.data = args.data or ckpt.get("data") or ("artifacts/pong-atari-pixels.pt" if latent else "artifacts/pong-episodes.pt")
+    args.output = args.output or args.resume or ("artifacts/pong-rssm.pt" if latent else "artifacts/pong.pt")
     if args.batch_size is None:
-        args.batch_size = 32 if latent else 256
+        args.batch_size = 16 if latent else 256
     if min(args.history, args.horizon, args.epochs, args.batch_size, args.samples) < 1 or args.collect_more < 0:
         parser.error("Training sizes must be positive; --collect-more must be nonnegative.")
     (train_latent if latent else train)(args)
