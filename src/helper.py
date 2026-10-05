@@ -5,14 +5,15 @@ import torch
 from PIL import Image, ImageDraw
 from .envs import PongEnv
 from .envs.pong import ram_image
-from .model import StateMLP
+from .mlp_model import StateMLP
 from .adapters import MLPAdapter
 
 
 @torch.no_grad()
 def gif(args):
-    ckpt = torch.load(args.ckpt, map_location='cpu', weights_only=True)
-    if ckpt.get('model_type') == 'latent':
+    from .latent_model import load_checkpoint, is_latent_checkpoint
+    ckpt = load_checkpoint(args.ckpt)
+    if is_latent_checkpoint(ckpt):
         return latent_gif(args, ckpt)
     adapter = MLPAdapter(StateMLP.load(args.ckpt, args.device))
     env, rng = PongEnv(render_mode="rgb_array"), np.random.default_rng(args.seed)
@@ -48,12 +49,11 @@ def gif(args):
 @torch.no_grad()
 def latent_gif(args, ckpt):
     from .adapters import LatentAdapter
-    from .latent import LatentModel
-    from .latent_training import frame
+    from .latent_model import LatentModel
+    from .training import frame
     from .envs.pixels import PixelPongEnv
 
     model = LatentModel.load(ckpt, args.device).eval()
-    history = args.history or ckpt['history']
     adapter = LatentAdapter(model, torch.Generator().manual_seed(args.seed))
     env, rng = PixelPongEnv(), np.random.default_rng(args.seed)
     frames = []
@@ -62,7 +62,7 @@ def latent_gif(args, ckpt):
         for _ in range(30):
             env.step(1)
         images, actions = [frame(env)], []
-        for _ in range(history-1):
+        for _ in range(args.history-1):
             action = int(rng.integers(6))
             _, _, done, truncated, _ = env.step(action)
             if done or truncated:
@@ -93,7 +93,7 @@ def latent_gif(args, ckpt):
             if done or truncated:
                 break
             if args.mode == 'one-step':
-                state = model.posterior(state['h'], real[None].float().to(args.device)/255., generator=adapter.generator)
+                state = model.posterior(state, real[None].float().to(args.device)/255., generator=adapter.generator)
     finally:
         env.close()
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

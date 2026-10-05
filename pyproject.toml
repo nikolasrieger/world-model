@@ -30,3 +30,6 @@ dev = [
 [tool.uv.build-backend]
 module-name = "src"
 module-root = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
