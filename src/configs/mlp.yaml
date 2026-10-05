@@ -1,0 +1,4 @@
+defaults:
+  - base
+  - model: mlp
+  - _self_

@@ -1,0 +1,4 @@
+defaults:
+  - base
+  - model: dreamerv3
+  - _self_

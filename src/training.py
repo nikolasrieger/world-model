@@ -5,6 +5,8 @@ import hashlib
 
 import numpy as np
 import torch
+from omegaconf import DictConfig, OmegaConf
+from .configs import load_model_config
 from torch.nn import functional as F
 
 from .envs import PongEnv
@@ -205,11 +207,12 @@ class MLPTraining:
         if not self.count or not len(self.val[3]):
             raise ValueError('Not enough RAM sequences for the requested horizon.')
         self.ckpt = load_checkpoint(args.resume) if args.resume else {}
-        self.model = StateMLP.load(args.resume, args.device) if args.resume else StateMLP().to(args.device)
+        config = getattr(args, 'model_config', None) or load_model_config('mlp')
+        self.model = StateMLP.load(args.resume, args.device) if args.resume else StateMLP(hidden=config['hidden']).to(args.device)
         if not args.resume:
             self.model.normalize(self.data[0], self.data[2])
         self.model.train()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config['learning_rate'])
         if 'opt' in self.ckpt:
             self.optimizer.load_state_dict(self.ckpt['opt'])
         self.resume_order = not args.collect_more and self.ckpt.get('horizon') == args.horizon
@@ -243,7 +246,7 @@ class LatentTraining:
     def __init__(self, args):
         self.args = args
         self.ckpt = ckpt = load_checkpoint(args.resume) if args.resume else {}
-        self.model = model = LatentModel.load(ckpt, args.device) if ckpt else LatentModel(device=args.device)
+        self.model = model = LatentModel.load(ckpt, args.device) if ckpt else LatentModel(config=getattr(args, 'model_config', None), device=args.device)
         config = model.config
         if args.sequence_length is not None:
             config['batch_length'] = args.sequence_length
@@ -288,7 +291,7 @@ class LatentTraining:
 
     def checkpoint(self, metrics):
         return dict(implementation='nm512-dreamerv3', optimizer=self.optimizer.state_dict(),
-                    config=dict(self.model.config), history=self.args.history, horizon=self.args.horizon,
+                    config=OmegaConf.to_container(self.model.config, resolve=True), history=self.args.history, horizon=self.args.horizon,
                     manifest=dict(upstream_commit='6ef8646d807cd10ce0c88e10a7e943211e7fc44c',
                                   dataset_sha256=self.dataset_hash, torch=str(torch.__version__)))
 
@@ -321,11 +324,13 @@ def train(args):
             return
         payload = trainer.checkpoint(metrics)
         payload.update(model_type=args.model, weights=trainer.model.state_dict(),
-                       step=step, epoch=epoch, data=str(args.data), metrics=metrics,
+                       step=step, epoch=epoch, batch_size=args.batch_size, data=str(args.data), metrics=metrics,
                        cpu_rng=torch.get_rng_state(),
                        mps_rng=torch.mps.get_rng_state() if torch.device(args.device).type == 'mps' else None,
                        order=order, offset=offset,
                        shuffle_rng=shuffle.get_state() if shuffle is not None else None)
+        if isinstance(args, DictConfig):
+            payload['run_config'] = OmegaConf.to_container(args, resolve=True)
         save_file(payload, output)
         if trainer.save_latest and improved:
             save_file(payload, output.with_name(output.stem + '.best' + output.suffix))

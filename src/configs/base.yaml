@@ -1,0 +1,36 @@
+command: train
+device: cpu
+seed: 0
+num_threads: 1
+
+# null uses the checkpoint's data path, or the model's default cache.
+data: null
+# null saves inside Hydra's unique run directory.
+output: null
+resume: null
+samples: 100000
+collect_more: 0
+epochs: 30
+max_updates: null
+
+# null preserves checkpoint settings on resume, otherwise model defaults.
+batch_size: null
+sequence_length: null
+free_nats: null
+history: 5
+horizon: 5
+eval_every: 250
+val_windows: 128
+
+# GIF options (command=gif).
+ckpt: null
+mode: open-loop
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: artifacts/runs/${model.name}/${now:%Y-%m-%d}/${now:%H-%M-%S-%f}
+  sweep:
+    dir: artifacts/multirun/${model.name}/${now:%Y-%m-%d}/${now:%H-%M-%S-%f}
+    subdir: ${hydra.job.num}

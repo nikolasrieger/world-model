@@ -1,11 +1,13 @@
 import torch
 from torch import nn
+from .configs import load_model_config
 from torch.nn import functional as F
 
 
 class StateMLP(nn.Module):
-    def __init__(self, hidden=64):
+    def __init__(self, hidden=None):
         super().__init__()
+        hidden = load_model_config('mlp').hidden if hidden is None else hidden
         self.net = nn.Sequential(
             nn.Linear(134, hidden), 
             nn.Tanh(), 

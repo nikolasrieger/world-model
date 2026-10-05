@@ -1,67 +1,13 @@
-import copy
 from types import SimpleNamespace
 import torch
+from omegaconf import OmegaConf
+from .configs import load_model_config
 from torch import nn
 from torch.nn import functional as F
 from ._dreamerv3 import networks, tools
 from .adapters import check_action
 
 to_np = lambda x: x.detach().cpu().numpy()
-
-DEFAULT_CONFIG = {
-    'dyn_stoch': 32,
-    'dyn_deter': 512,
-    'dyn_hidden': 512,
-    'dyn_rec_depth': 1,
-    'dyn_discrete': 32,
-    'act': 'SiLU',
-    'norm': True,
-    'dyn_mean_act': 'none',
-    'dyn_std_act': 'sigmoid2',
-    'dyn_min_std': 0.1,
-    'unimix_ratio': 0.01,
-    'initial': 'learned',
-    'num_actions': 6,
-    'encoder': {'mlp_keys': '$^',
-                'cnn_keys': 'image',
-                'act': 'SiLU',
-                'norm': True,
-                'cnn_depth': 32,
-                'kernel_size': 4,
-                'minres': 4,
-                'mlp_layers': 5,
-                'mlp_units': 1024,
-                'symlog_inputs': True},
-    'decoder': {'mlp_keys': '$^',
-                'cnn_keys': 'image',
-                'act': 'SiLU',
-                'norm': True,
-                'cnn_depth': 32,
-                'kernel_size': 4,
-                'minres': 4,
-                'mlp_layers': 5,
-                'mlp_units': 1024,
-                'cnn_sigmoid': False,
-                'image_dist': 'mse',
-                'vector_dist': 'symlog_mse',
-                'outscale': 1.0},
-    'reward_head': {'layers': 2, 'dist': 'symlog_disc', 'loss_scale': 1.0, 'outscale': 0.0},
-    'cont_head': {'layers': 2, 'loss_scale': 1.0, 'outscale': 1.0},
-    'units': 512,
-    'grad_heads': ['decoder', 'reward', 'cont'],
-    'model_lr': 0.0001,
-    'opt_eps': 1e-08,
-    'grad_clip': 1000,
-    'weight_decay': 0.0,
-    'opt': 'adam',
-    'precision': 32,
-    'discount': 0.997,
-    'kl_free': 1.0,
-    'dyn_scale': 0.5,
-    'rep_scale': 0.1,
-    'batch_size': 16,
-    'batch_length': 50
-}
 
 
 class WorldModel(nn.Module):
@@ -252,17 +198,12 @@ def load_checkpoint(path):
         return torch.load(path, map_location='cpu', weights_only=True)
 
 
-def is_latent_checkpoint(ckpt):
-    return ckpt.get('model_type') == 'latent' or (
-        'config' in ckpt and 'dyn_stoch' in ckpt['config'] and 'weights' in ckpt)
-
-
 class LatentModel(WorldModel):
     def __init__(self, config=None, device='cpu'):
-        self.config = copy.deepcopy(DEFAULT_CONFIG if config is None else config)
+        self.config = load_model_config('dreamerv3') if config is None else OmegaConf.create(config)
         self.config['device'] = str(device)
         obs = SimpleNamespace(spaces={'image': SimpleNamespace(shape=(64, 64, 1))})
-        super().__init__(obs, SimpleNamespace(n=6), 0, SimpleNamespace(**self.config))
+        super().__init__(obs, SimpleNamespace(n=6), 0, self.config)
         self.to(device)
 
     def _apply(self, fn, recurse=True):

@@ -1,0 +1,65 @@
+name: dreamerv3
+dyn_stoch: 32
+dyn_deter: 512
+dyn_hidden: 512
+dyn_rec_depth: 1
+dyn_discrete: 32
+act: SiLU
+norm: true
+dyn_mean_act: none
+dyn_std_act: sigmoid2
+dyn_min_std: 0.1
+unimix_ratio: 0.01
+initial: learned
+num_actions: 6
+encoder:
+  mlp_keys: $^
+  cnn_keys: image
+  act: SiLU
+  norm: true
+  cnn_depth: 32
+  kernel_size: 4
+  minres: 4
+  mlp_layers: 5
+  mlp_units: 1024
+  symlog_inputs: true
+decoder:
+  mlp_keys: $^
+  cnn_keys: image
+  act: SiLU
+  norm: true
+  cnn_depth: 32
+  kernel_size: 4
+  minres: 4
+  mlp_layers: 5
+  mlp_units: 1024
+  cnn_sigmoid: false
+  image_dist: mse
+  vector_dist: symlog_mse
+  outscale: 1.0
+reward_head:
+  layers: 2
+  dist: symlog_disc
+  loss_scale: 1.0
+  outscale: 0.0
+cont_head:
+  layers: 2
+  loss_scale: 1.0
+  outscale: 1.0
+units: 512
+grad_heads:
+- decoder
+- reward
+- cont
+model_lr: 0.0001
+opt_eps: 1.0e-08
+grad_clip: 1000
+weight_decay: 0.0
+opt: adam
+precision: 32
+discount: 0.997
+kl_free: 1.0
+dyn_scale: 0.5
+rep_scale: 0.1
+batch_size: 16
+batch_length: 50
