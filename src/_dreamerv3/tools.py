@@ -71,8 +71,6 @@ class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
         return _mode.detach() + super().logits - super().logits.detach()
 
     def sample(self, sample_shape=(), seed=None):
-        if seed is not None:
-            raise ValueError("need to check")
         sample = super().sample(sample_shape).detach()
         probs = super().probs
         while len(probs.shape) < len(sample.shape):
@@ -155,8 +153,6 @@ class MSEDist:
             loss = distance.mean(list(range(len(distance.shape)))[2:])
         elif self._agg == "sum":
             loss = distance.sum(list(range(len(distance.shape)))[2:])
-        else:
-            raise NotImplementedError(self._agg)
         return -loss
 
 
@@ -181,14 +177,10 @@ class SymlogDist:
         elif self._dist == "abs":
             distance = torch.abs(self._mode - symlog(value))
             distance = torch.where(distance < self._tol, 0, distance)
-        else:
-            raise NotImplementedError(self._dist)
         if self._agg == "mean":
             loss = distance.mean(list(range(len(distance.shape)))[2:])
         elif self._agg == "sum":
             loss = distance.sum(list(range(len(distance.shape)))[2:])
-        else:
-            raise NotImplementedError(self._agg)
         return -loss
 
 

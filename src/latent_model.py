@@ -80,9 +80,7 @@ class WorldModel(nn.Module):
             opt=config.opt,
             use_amp=self._use_amp,
         )
-        print(
-            f"Optimizer model_opt has {sum(param.numel() for param in self.parameters())} variables."
-        )
+        print(f"Optimizer model_opt has {sum(param.numel() for param in self.parameters())} variables.")
         # other losses are scaled by 1.0.
         self._scales = dict(
             reward=config.reward_head["loss_scale"],
@@ -302,3 +300,7 @@ class LatentModel(WorldModel):
         model = cls(config, device)
         model.load_state_dict(ckpt['weights'], strict=True)
         return model
+
+
+def is_latent_checkpoint(checkpoint):
+    return checkpoint.get("implementation") == "nm512-dreamerv3"

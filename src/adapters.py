@@ -1,4 +1,3 @@
-"""Small inference contract and nested-state helpers; no environment runtime."""
 from typing import Protocol
 import torch
 
@@ -13,13 +12,17 @@ def check_history(obs):
         raise ValueError('Expected RAM history [batch, time, 128].')
 
 
-def map_state(state, fn):
+def map_state(state, fn, strict=False):
     if isinstance(state, torch.Tensor):
         return fn(state)
     if isinstance(state, dict):
-        return {k: map_state(v, fn) for k, v in state.items()}
+        if strict and any(type(k) not in (type(None), bool, int, float, complex, str, bytes) for k in state):
+            raise TypeError('State dictionary keys must be immutable scalars.')
+        return {k: map_state(v, fn, strict) for k, v in state.items()}
     if isinstance(state, (tuple, list)):
-        return type(state)(map_state(v, fn) for v in state)
+        return type(state)(map_state(v, fn, strict) for v in state)
+    if strict and not isinstance(state, (type(None), bool, int, float, complex, str, bytes)):
+        raise TypeError(f'Unsupported state leaf: {type(state).__name__}')
     return state
 
 
@@ -70,17 +73,20 @@ class MLPAdapter:
 class LatentAdapter:
     def __init__(self, model, generator=None):
         self.model, self.generator = model, generator
-        self.capabilities = dict(deterministic=False, recurrent=True, gradients=True, decoder=model.decoder is not None, heads=model.heads is not None)
+        self.capabilities = dict(deterministic=False, explicit_rng=True, recurrent=True, gradients=True, decoder=model.decoder is not None, heads=model.heads is not None)
 
     @property
     def device(self):
         return next(self.model.parameters()).device
 
-    def initialize(self, context, noise=None):
-        return self.model.initialize(context, noise=noise, generator=self.generator)
+    def initialize(self, context, noise=None, generator=None):
+        return self.model.initialize(context, noise=noise, generator=generator if generator is not None else self.generator)
 
-    def step(self, state, action, noise=None):
-        return self.model.prior(state, action, noise=noise, generator=self.generator)
+    def step(self, state, action, noise=None, generator=None):
+        return self.model.prior(state, action, noise=noise, generator=generator if generator is not None else self.generator)
+
+    def correct(self, state, observation, generator=None):
+        return self.model.posterior(state, observation, generator=generator if generator is not None else self.generator)
 
     def observe(self, state):
         return self.model.observe(state)

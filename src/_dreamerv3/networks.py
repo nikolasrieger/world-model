@@ -122,8 +122,6 @@ class RSSM(nn.Module):
             state["deter"] = torch.tanh(self.W).repeat(batch_size, 1)
             state["stoch"] = self.get_stoch(state["deter"])
             return state
-        else:
-            raise NotImplementedError(self._initial)
 
     def observe(self, embed, action, is_first, state=None):
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
@@ -317,8 +315,6 @@ class MultiEncoder(nn.Module):
             for k, v in shapes.items()
             if len(v) in (1, 2) and re.match(mlp_keys, k)
         }
-        print("Encoder CNN shapes:", self.cnn_shapes)
-        print("Encoder MLP shapes:", self.mlp_shapes)
 
         self.outdim = 0
         if self.cnn_shapes:
@@ -384,8 +380,6 @@ class MultiDecoder(nn.Module):
             for k, v in shapes.items()
             if len(v) in (1, 2) and re.match(mlp_keys, k)
         }
-        print("Decoder CNN shapes:", self.cnn_shapes)
-        print("Decoder MLP shapes:", self.mlp_shapes)
 
         if self.cnn_shapes:
             some_shape = list(self.cnn_shapes.values())[0]

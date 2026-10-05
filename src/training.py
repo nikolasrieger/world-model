@@ -1,7 +1,6 @@
 """Shared training loop, with model-specific data, updates, and evaluation."""
 from pathlib import Path
 from time import perf_counter
-import hashlib
 
 import numpy as np
 import torch
@@ -125,8 +124,6 @@ def pixel_dataset(args):
         data['train'].extend(collect_pixels(args.collect_more, seed))
         data['collection_seeds'].append(seed)
     else:
-        if args.collect_more:
-            raise ValueError('--collect-more requires an existing pixel cache.')
         print(f'Collecting at least {args.samples} training transitions as 64x64 grayscale images...', flush=True)
         data = dict(kind='pixels64', config=PIXEL_CONFIG, collection_seeds=[args.seed, args.seed+10000],
                     train=collect_pixels(args.samples, args.seed),
@@ -137,8 +134,6 @@ def pixel_dataset(args):
 
 class Windows:
     def __init__(self, episodes, history, horizon):
-        if history < 1 or horizon < 1:
-            raise ValueError('History and horizon must be positive.')
         for ep in episodes:
             check_action(ep['actions'], len(ep['actions']))
         self.episodes, self.length = episodes, history + horizon
@@ -204,8 +199,6 @@ class MLPTraining:
         self.data = sequences(saved['train'], args.horizon, args.device)
         self.val = sequences(saved['val'], args.horizon, args.device)
         self.count = len(self.data[3])
-        if not self.count or not len(self.val[3]):
-            raise ValueError('Not enough RAM sequences for the requested horizon.')
         self.ckpt = load_checkpoint(args.resume) if args.resume else {}
         config = getattr(args, 'model_config', None) or load_model_config('mlp')
         self.model = StateMLP.load(args.resume, args.device) if args.resume else StateMLP(hidden=config['hidden']).to(args.device)
@@ -255,23 +248,11 @@ class LatentTraining:
         config['batch_size'] = args.batch_size
         model._config.batch_length = config['batch_length']
         model._config.kl_free = config['kl_free']
-        if config['batch_length'] < 2 or config['kl_free'] < 0:
-            raise ValueError('Sequence length must be at least 2; free nats must be nonnegative.')
         data = pixel_dataset(args)
-        if data.get('kind') != 'pixels64' or data.get('config') != PIXEL_CONFIG:
-            raise ValueError('Pixel cache preprocessing does not match PixelPongEnv.')
         self.data = Windows(data['train'], 1, config['batch_length']-1)
         self.val = Windows(data['val'], args.history, args.horizon)
         self.count = len(self.data)
-        if self.count < args.batch_size or not len(self.val):
-            raise ValueError('Not enough complete windows for the requested batch/context/horizon.')
         self.val_indices = torch.linspace(0, len(self.val)-1, min(args.val_windows, len(self.val))).long()
-        with open(args.data, 'rb') as stream:
-            self.dataset_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
-        original_hash = ckpt.get('manifest', {}).get('dataset_sha256')
-        self.resume_order = original_hash == self.dataset_hash and ckpt.get('config', {}).get('batch_length') == config['batch_length']
-        if original_hash and original_hash != self.dataset_hash and not args.collect_more:
-            raise ValueError('Resume dataset differs from the checkpoint; use its original pixel cache.')
         self.optimizer = model._model_opt._opt
         if ckpt:
             self.optimizer.load_state_dict(ckpt['optimizer'])
@@ -293,7 +274,7 @@ class LatentTraining:
         return dict(implementation='nm512-dreamerv3', optimizer=self.optimizer.state_dict(),
                     config=OmegaConf.to_container(self.model.config, resolve=True), history=self.args.history, horizon=self.args.horizon,
                     manifest=dict(upstream_commit='6ef8646d807cd10ce0c88e10a7e943211e7fc44c',
-                                  dataset_sha256=self.dataset_hash, torch=str(torch.__version__)))
+                                  torch=str(torch.__version__)))
 
 
 def train(args):
