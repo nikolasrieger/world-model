@@ -33,3 +33,10 @@ uv run python -m examples.branch_mlp --ckpt artifacts/pong.pt --device cpu --out
 uv run python -m examples.branch_latent --ckpt PATH_TO_DREAMERV3_CHECKPOINT --device cpu --output artifacts/latent-branches.npz
 uv run pytest
 ```
+
+Run headless diagnostics on recorded validation episodes:
+
+```bash
+uv run world-model command=diagnose ckpt=artifacts/pong.pt data=artifacts/pong-episodes.pt history=5 horizon=10 val_windows=32 output=artifacts/mlp-diagnostics.json
+uv run world-model --config-name dreamerv3 command=diagnose ckpt=artifacts/integrated-dreamerv3/resume-smoke.pt data=artifacts/pong-atari-pixels.pt history=5 horizon=10 val_windows=32 'diagnostic_seeds=[0,1,2]' output=artifacts/latent-diagnostics.json
+```

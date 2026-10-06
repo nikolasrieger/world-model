@@ -22,7 +22,10 @@ horizon: 5
 eval_every: 250
 val_windows: 128
 
-# GIF options (command=gif).
+# Sampling seeds for command=diagnose (MLP uses only the first).
+diagnostic_seeds: [0, 1, 2]
+
+# Checkpoint for command=gif or command=diagnose.
 ckpt: null
 mode: open-loop
 

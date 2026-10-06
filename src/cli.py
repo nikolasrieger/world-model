@@ -16,8 +16,9 @@ def prepare_config(cfg: DictConfig, output_dir: str) -> DictConfig:
     for key in ('data', 'output', 'resume', 'ckpt'):
         if args[key] is not None:
             args[key] = to_absolute_path(args[key])
-    if args.command == 'gif':
-        args.output = args.output or str(Path(output_dir) / 'prediction.gif')
+    if args.command in ('gif', 'diagnose'):
+        filename = 'prediction.gif' if args.command == 'gif' else 'diagnostics.json'
+        args.output = args.output or str(Path(output_dir) / filename)
         return args
     model = OmegaConf.to_container(args.model, resolve=True)
     name = model.pop('name')
@@ -53,7 +54,11 @@ def main(cfg: DictConfig):
     if args.device == 'mps' and not torch.backends.mps.is_available():
         raise ValueError('MPS is unavailable; use device=cpu.')
     OmegaConf.save(args, Path(output_dir) / 'effective-config.yaml', resolve=True)
-    (gif if args.command == 'gif' else train)(args)
+    from .diagnostics import diagnose
+    commands = {'train': train, 'gif': gif, 'diagnose': diagnose}
+    if args.command not in commands:
+        raise ValueError(f'Unknown command: {args.command}')
+    commands[args.command](args)
 
 
 if __name__ == '__main__':
