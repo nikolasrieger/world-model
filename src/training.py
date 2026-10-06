@@ -8,21 +8,19 @@ from omegaconf import DictConfig, OmegaConf
 from .configs import load_model_config
 from torch.nn import functional as F
 
-from .envs import PongEnv
-from .envs.pong import CONFIG as RAM_CONFIG
-from .envs.pixels import PixelPongEnv, PIXEL_CONFIG
+from .envs.atari import make_env, validate_metadata, RAM_CONFIG, PIXEL_CONFIG
 from .mlp_model import StateMLP
 from .latent_model import LatentModel, load_checkpoint
 from .adapters import check_action
 
 
-def collect(count, seed):
-    env, rng = PongEnv(), np.random.default_rng(seed)
+def collect(count, seed, spec):
+    env, rng = make_env(spec), np.random.default_rng(seed)
     state, _ = env.reset(seed=seed)
     episodes, states, actions, total = [], [state], [], 0
     try:
         while total < count or actions: 
-            action = int(rng.integers(6))
+            action = int(rng.integers(env.action_space.n))
             state, _, done, truncated, _ = env.step(action)
             states.append(state)
             actions.append(action)
@@ -40,16 +38,18 @@ def dataset(args):
     if path.exists():
         print(f"Loading episodes from {path}.", flush=True)
         saved = torch.load(path, map_location="cpu", weights_only=True)
+        validate_metadata(saved, dict(args.environment))
         if not args.collect_more:
             return saved
         used = saved.get("collection_seeds", [saved["seed"], saved["seed"] + 10000])
         seed = max(used) + 1
-        saved["train"].extend(collect(args.collect_more, seed))
+        saved["train"].extend(collect(args.collect_more, seed, args.environment))
         saved["collection_seeds"] = [*used, seed]
     else:
-        saved = {"config": RAM_CONFIG, "seed": args.seed,
-                 "train": collect(args.samples, args.seed),
-                 "val": collect(max(256, args.samples // 5), args.seed + 10000)}
+        saved = {"config": {**RAM_CONFIG, "full_action_space": args.environment["full_action_space"]}, "seed": args.seed, "environment": dict(args.environment),
+                 "train": collect(args.samples, args.seed, args.environment),
+                 "val": collect(max(256, args.samples // 5), args.seed + 10000, args.environment)}
+    saved["environment"] = dict(args.environment)
     save_file(saved, path)
     return saved
 
@@ -80,18 +80,18 @@ def frame(env):
     return env.frame()
 
 
-def collect_pixels(count, seed):
-    env, rng = PixelPongEnv(), np.random.default_rng(seed)
+def collect_pixels(count, seed, spec):
+    env, rng = make_env(spec, latent=True), np.random.default_rng(seed)
     episodes, total = [], 0
     try:
         env.reset(seed=seed)
         images, actions, rewards, terminals = [frame(env)], [], [], []
         while total < count or actions:
-            action = int(rng.integers(6))
+            action = int(rng.integers(env.action_space.n))
             _, reward, terminated, truncated, _ = env.step(action)
             images.append(frame(env))
             actions.append(action)
-            rewards.append(int(reward) + 1)
+            rewards.append(float(reward))
             terminals.append(terminated) 
             total += 1
             if terminated or truncated:
@@ -116,26 +116,36 @@ def pixel_dataset(args):
     path = Path(args.data)
     if path.exists():
         data = torch.load(path, map_location='cpu', weights_only=True)
+        validate_metadata(data, dict(args.environment))
         if not args.collect_more:
             print(f'Reusing pixel episodes from {path}; no collection.', flush=True)
             return data
+        if data.get('reward_encoding', 'offset_one') == 'offset_one':
+            for split in ('train', 'val'):
+                for episode in data[split]:
+                    episode['rewards'] = episode['rewards'].float() - 1
+            data['reward_encoding'] = 'raw'
         seed = max(data['collection_seeds']) + 1
         print(f'Appending pixel episodes (at least {args.collect_more} transitions, seed {seed}).', flush=True)
-        data['train'].extend(collect_pixels(args.collect_more, seed))
+        data['train'].extend(collect_pixels(args.collect_more, seed, args.environment))
         data['collection_seeds'].append(seed)
     else:
-        print(f'Collecting at least {args.samples} training transitions as 64x64 grayscale images...', flush=True)
-        data = dict(kind='pixels64', config=PIXEL_CONFIG, collection_seeds=[args.seed, args.seed+10000],
-                    train=collect_pixels(args.samples, args.seed),
-                    val=collect_pixels(max(256, args.samples//5), args.seed+10000))
+        print(f'Collecting at least {args.samples} training transitions as grayscale images...', flush=True)
+        data = dict(kind='pixels', config={**PIXEL_CONFIG, 'size': args.environment['image_size'], 'full_action_space': args.environment['full_action_space']},
+                    environment=dict(args.environment), reward_encoding='raw', collection_seeds=[args.seed, args.seed+10000],
+                    train=collect_pixels(args.samples, args.seed, args.environment),
+                    val=collect_pixels(max(256, args.samples//5), args.seed+10000, args.environment))
+    data["environment"] = dict(args.environment)
     save_file(data, path)
     return data
 
 
 class Windows:
-    def __init__(self, episodes, history, horizon):
+    def __init__(self, episodes, history, horizon, num_actions, reward_encoding="raw"):
+        self.num_actions = num_actions
+        self.reward_offset = 1 if reward_encoding == "offset_one" else 0
         for ep in episodes:
-            check_action(ep['actions'], len(ep['actions']))
+            check_action(ep['actions'], len(ep['actions']), num_actions)
         self.episodes, self.length = episodes, history + horizon
         self.indices = [(i, start) for i, ep in enumerate(episodes)
                         for start in range(len(ep['frames']) - self.length + 1)]
@@ -150,10 +160,10 @@ class Windows:
             data = self.episodes[ep]
             stop = start + self.length
             rows.append((data['frames'][start:stop], data['actions'][start:stop-1],
-                         data['rewards'][start:stop-1]-1, data['terminated'][start:stop-1]))
+                         data['rewards'][start:stop-1]-self.reward_offset, data['terminated'][start:stop-1]))
         images, actions, rewards, terminals = (torch.stack(x) for x in zip(*rows))
-        controls = F.one_hot(actions.long(), 6).float()
-        controls = torch.cat((torch.zeros(len(rows), 1, 6), controls), 1)
+        controls = F.one_hot(actions.long(), self.num_actions).float()
+        controls = torch.cat((torch.zeros(len(rows), 1, self.num_actions), controls), 1)
         first = torch.zeros(len(rows), self.length)
         first[:, 0] = 1
         return dict(image=images.permute(0, 1, 3, 4, 2).numpy(), action=controls.numpy(),
@@ -201,7 +211,7 @@ class MLPTraining:
         self.count = len(self.data[3])
         self.ckpt = load_checkpoint(args.resume) if args.resume else {}
         config = getattr(args, 'model_config', None) or load_model_config('mlp')
-        self.model = StateMLP.load(args.resume, args.device) if args.resume else StateMLP(hidden=config['hidden']).to(args.device)
+        self.model = StateMLP.load(args.resume, args.device) if args.resume else StateMLP(hidden=config['hidden'], observation_dim=config['observation_shape'][0], num_actions=config['num_actions']).to(args.device)
         if not args.resume:
             self.model.normalize(self.data[0], self.data[2])
         self.model.train()
@@ -226,7 +236,7 @@ class MLPTraining:
         return {'rollout_mse': total / len(self.val[3])}
 
     def checkpoint(self, metrics):
-        return dict(env_name='pong', dimensions=(128, 6, self.model.net[0].out_features),
+        return dict(dimensions=(self.model.observation_dim, self.model.num_actions, self.model.net[0].out_features),
                     opt=self.optimizer.state_dict(), rng_state=torch.get_rng_state(),
                     val_mse=metrics['rollout_mse'], horizon=self.args.horizon)
 
@@ -248,8 +258,8 @@ class LatentTraining:
         model._config.batch_length = config['batch_length']
         model._config.kl_free = config['kl_free']
         data = pixel_dataset(args)
-        self.data = Windows(data['train'], 1, config['batch_length']-1)
-        self.val = Windows(data['val'], args.history, args.horizon)
+        self.data = Windows(data['train'], 1, config['batch_length']-1, model.num_actions, data.get('reward_encoding', 'offset_one'))
+        self.val = Windows(data['val'], args.history, args.horizon, model.num_actions, data.get('reward_encoding', 'offset_one'))
         self.count = len(self.data)
         self.val_indices = torch.linspace(0, len(self.val)-1, min(args.val_windows, len(self.val))).long()
         self.optimizer = model._model_opt._opt
@@ -295,7 +305,7 @@ def train(args):
         if not (trainer.save_latest or improved):
             return
         payload = trainer.checkpoint(metrics)
-        payload.update(model_type=args.model, weights=trainer.model.state_dict(),
+        payload.update(environment=dict(args.environment), model_type=args.model, weights=trainer.model.state_dict(),
                        step=step, epoch=epoch, batch_size=args.batch_size, data=str(args.data), metrics=metrics,
                        cpu_rng=torch.get_rng_state(),
                        mps_rng=torch.mps.get_rng_state() if torch.device(args.device).type == 'mps' else None)

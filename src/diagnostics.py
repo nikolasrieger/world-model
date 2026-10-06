@@ -12,31 +12,24 @@ def mse(prediction, target):
     return float((prediction - target).square().mean())
 
 
-def motion_metrics(prediction, target, previous, latent):
+def motion_metrics(prediction, target, previous, latent, ram_metrics=None):
     if latent:
         mask = (target - previous).abs() > 1 / 255
         return {'changed_pixel_mse': mse(prediction[mask], target[mask]) if mask.any() else None,
                 'changed_pixel_count': int(mask.sum())}
-    pred, true = prediction * 255, target * 255
-    result = {'paddle_y_mae': float((pred[..., [50, 51]] - true[..., [50, 51]]).abs().mean())}
-    visible = (true[..., 49] > 49) & (true[..., 49] < 209) & (true[..., 54] >= 48) & (true[..., 54] <= 207)
-    pred_visible = (pred[..., 49] > 49) & (pred[..., 49] < 209) & (pred[..., 54] >= 48) & (pred[..., 54] <= 207)
-    result['ball_position_error'] = float(torch.linalg.vector_norm(pred[..., [49, 54]] - true[..., [49, 54]], dim=-1)[visible].mean()) if visible.any() else None
-    result['ball_visible_recall'] = float(pred_visible[visible].float().mean()) if visible.any() else None
-    result['ball_visible_count'] = int(visible.sum())
-    return result
+    return ram_metrics(prediction, target) if ram_metrics is not None else {}
 
 
-def select_windows(episodes, latent, history, horizon, limit):
+def select_windows(episodes, latent, history, horizon, limit, observation_shape, num_actions):
     windows = []
     for index, episode in enumerate(episodes):
         observations, actions = (episode['frames'], episode['actions']) if latent else episode
         if len(observations) != len(actions) + 1:
             raise ValueError(f'Episode {index}: expected one more observation than actions.')
-        expected = (1, 64, 64) if latent else (128,)
+        expected = tuple(observation_shape)
         if tuple(observations.shape[1:]) != expected:
             raise ValueError(f'Episode {index}: expected observation shape {expected}.')
-        check_action(actions, len(actions))
+        check_action(actions, len(actions), num_actions)
         windows.extend((index, start) for start in range(len(observations) - history - horizon + 1))
     if not windows:
         raise ValueError('No validation episodes are long enough for history + horizon.')
@@ -45,7 +38,7 @@ def select_windows(episodes, latent, history, horizon, limit):
 
 
 @torch.no_grad()
-def diagnose_window(adapter, observations, actions, history, horizon, seed, latent):
+def diagnose_window(adapter, observations, actions, history, horizon, seed, latent, ram_metrics=None):
     generator = torch.Generator().manual_seed(seed)
 
     def noise(time=None):
@@ -60,7 +53,7 @@ def diagnose_window(adapter, observations, actions, history, horizon, seed, late
     initial = adapter.observe(state)
     target_initial = observations[None, history-1].to(initial.device)
     rows = [{'stage': 'initialization', 'horizon': 0, 'mse': mse(initial, target_initial),
-             **motion_metrics(initial, target_initial, observations[None, max(0, history-2)].to(initial.device), latent)}]
+             **motion_metrics(initial, target_initial, observations[None, max(0, history-2)].to(initial.device), latent, ram_metrics)}]
     corrected = state
     for step in range(horizon):
         action = actions[history-1+step:history+step]
@@ -69,7 +62,7 @@ def diagnose_window(adapter, observations, actions, history, horizon, seed, late
         # explained by different random draws at this transition.
         if step == 0:
             target = observations[None, history].to(initial.device)
-            probes = [adapter.observe(adapter.step(state, [a], noise=shared_noise)) for a in range(6)]
+            probes = [adapter.observe(adapter.step(state, [a], noise=shared_noise)) for a in range(adapter.model.num_actions)]
             factual = int(action.item())
             errors = [mse(p, target) for p in probes]
             rows.append({'stage': 'action_response', 'horizon': 1,
@@ -84,7 +77,7 @@ def diagnose_window(adapter, observations, actions, history, horizon, seed, late
         previous = observations[None, history+step-1].to(pred.device)
         for stage, value in [('open_loop', pred), ('corrected_one_step', teacher), ('persistence', target_initial)]:
             rows.append({'stage': stage, 'horizon': step+1, 'mse': mse(value, target),
-                         **motion_metrics(value, target, previous, latent),
+                         **motion_metrics(value, target, previous, latent, ram_metrics),
                          **({'mse_excess_over_corrected': mse(pred, target) - mse(teacher, target)}
                             if stage == 'open_loop' else {})})
         if step + 1 < horizon:
@@ -127,14 +120,17 @@ def diagnose(args):
         raise ValueError('diagnostic_seeds must not be empty.')
     ckpt = load_checkpoint(args.ckpt)
     latent = is_latent_checkpoint(ckpt)
-    path = Path(args.data or ckpt.get('data') or (
-        'artifacts/pong-atari-pixels.pt' if latent else 'artifacts/pong-episodes.pt'))
+    from .envs.atari import environment_spec, default_data_path, validate_metadata, object_metrics
+    spec = environment_spec(args, ckpt)
+    path = Path(args.data or ckpt.get('data') or default_data_path(spec, latent))
     data = torch.load(path, map_location='cpu', weights_only=True)
     if 'val' not in data or not data['val']:
         raise ValueError('Dataset must contain nonempty held-out val episodes.')
+    validate_metadata(data, spec)
     episodes = data['val']
-    windows = select_windows(episodes, latent, args.history, args.horizon, args.val_windows)
     adapter = LatentAdapter(LatentModel.load(ckpt, args.device).eval()) if latent else MLPAdapter(StateMLP.load(args.ckpt, args.device))
+    windows = select_windows(episodes, latent, args.history, args.horizon, args.val_windows,
+                             adapter.model.observation_shape, adapter.model.num_actions)
     if not latent:
         seeds = seeds[:1]  # Deterministic predictions do not need repeated sampling.
     rows = []
@@ -148,12 +144,12 @@ def diagnose(args):
             raise ValueError('Expected finite normalized observations in [0, 1].')
         actions = actions[start:start+args.history+args.horizon-1]
         for seed in seeds:
-            for row in diagnose_window(adapter, observations, actions, args.history, args.horizon, seed, latent):
+            for row in diagnose_window(adapter, observations, actions, args.history, args.horizon, seed, latent, object_metrics(spec)):
                 rows.append(dict(episode=index, start=start, seed=seed, **row))
     summary = summarize(rows)
     report = dict(schema_version=1, model='latent' if latent else 'mlp',
                   checkpoint=str(Path(args.ckpt).resolve()), data=str(path.resolve()), split='val',
-                  device=str(args.device), torch_version=str(torch.__version__), history=args.history, horizon=args.horizon,
+                  environment=spec, device=str(args.device), torch_version=str(torch.__version__), history=args.history, horizon=args.horizon,
                   windows=len(windows), sampling_seeds=seeds, summary=summary, records=rows)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +165,8 @@ def diagnose(args):
     for entry in summary:
         if entry['stage'] != 'open_loop':
             continue
-        keys = ['changed_pixel_mse'] if latent else ['paddle_y_mae', 'ball_position_error', 'ball_visible_recall']
+        keys = ['changed_pixel_mse'] if latent else [key for key in ('paddle_y_mae', 'ball_position_error', 'ball_visible_recall') if key in entry]
         values = ', '.join(f'{key}={entry[key]["mean"]}' for key in keys)
-        print(f'h={entry["horizon"]}: {values}; excess MSE over corrected={entry["mse_excess_over_corrected"]["mean"]:.6g}')
+        print(f'h={entry["horizon"]}: ' + (values + '; ' if values else '') +
+              f'excess MSE over corrected={entry["mse_excess_over_corrected"]["mean"]:.6g}')
     print(f'Saved diagnostic details to {output}')

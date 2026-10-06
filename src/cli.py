@@ -9,6 +9,7 @@ import torch
 from .helper import gif
 from .latent_model import load_checkpoint
 from .training import train
+from .envs.atari import environment_spec, default_data_path, make_env
 
 
 def prepare_config(cfg: DictConfig, output_dir: str) -> DictConfig:
@@ -16,6 +17,9 @@ def prepare_config(cfg: DictConfig, output_dir: str) -> DictConfig:
     for key in ('data', 'output', 'resume', 'ckpt'):
         if args[key] is not None:
             args[key] = to_absolute_path(args[key])
+    checkpoint_path = args.ckpt if args.command in ('gif', 'diagnose') else args.resume
+    checkpoint = load_checkpoint(checkpoint_path) if checkpoint_path else {}
+    args.environment = environment_spec(args, checkpoint)
     if args.command in ('gif', 'diagnose'):
         filename = 'prediction.gif' if args.command == 'gif' else 'diagnostics.json'
         args.output = args.output or str(Path(output_dir) / filename)
@@ -31,9 +35,22 @@ def prepare_config(cfg: DictConfig, output_dir: str) -> DictConfig:
             model['hidden'] = ckpt['dimensions'][2]
             model['learning_rate'] = ckpt['opt']['param_groups'][0]['lr']
     args.model = kind
+    env = make_env(args.environment, kind == 'latent')
+    try:
+        num_actions = int(env.action_space.n)
+        observation_shape = ([1, args.environment.image_size, args.environment.image_size]
+                             if kind == 'latent' else list(env.observation_space.shape))
+    finally:
+        env.close()
+    if ckpt:
+        old_actions = ckpt['config']['num_actions'] if kind == 'latent' else ckpt['dimensions'][1]
+        old_shape = ckpt['config'].get('observation_shape', [1, 64, 64]) if kind == 'latent' else [ckpt['dimensions'][0]]
+        if num_actions != old_actions or list(old_shape) != observation_shape:
+            raise ValueError('Checkpoint dimensions do not match the environment.')
+    model['num_actions'] = num_actions
+    model['observation_shape'] = observation_shape
     args.model_config = model
-    args.data = to_absolute_path(args.data or ckpt.get('data') or (
-        'artifacts/pong-atari-pixels.pt' if kind == 'latent' else 'artifacts/pong-episodes.pt'))
+    args.data = to_absolute_path(args.data or ckpt.get('data') or default_data_path(args.environment, kind == 'latent'))
     args.output = args.output or str(Path(output_dir) / 'checkpoint.pt')
     args.batch_size = args.batch_size if args.batch_size is not None else ckpt.get('batch_size', model['batch_size'])
     args.model_config.batch_size = args.batch_size

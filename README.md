@@ -1,6 +1,6 @@
 # world-model
 
-Train Pong predictors from RAM (MLP) or grayscale images (DreamerV3).
+Train Atari predictors (e.g. Pong) from RAM (MLP) or grayscale images (DreamerV3).
 
 The two example configs are [mlp.yaml](src/configs/mlp.yaml) and [dreamerv3.yaml](src/configs/dreamerv3.yaml).
 

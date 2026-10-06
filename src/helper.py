@@ -2,22 +2,24 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
-from .envs import PongEnv
-from .envs.pong import ram_image
+from .envs.atari import environment_spec, make_env, startup_action, ram_renderer
 from .mlp_model import StateMLP
 from .adapters import MLPAdapter, LatentAdapter
 from .runtime import WorldRuntime
 
 
 def _ram_frame(env, observation, args):
-    frame = Image.new("RGB", (328, 238), (12, 18, 28))
-    frame.paste(Image.fromarray(env.render()), (0, 28))
-    frame.paste(ram_image(observation[0].cpu().numpy()), (168, 28))
+    actual = Image.fromarray(env.render())
+    prediction = ram_renderer(args.environment)(observation[0].cpu().numpy()).resize(actual.size)
+    width, height = actual.size
+    frame = Image.new('RGB', (2 * width + 8, height + 28), (12, 18, 28))
+    frame.paste(actual, (0, 28))
+    frame.paste(prediction, (width + 8, 28))
     draw = ImageDraw.Draw(frame)
-    draw.text((4, 3), "ALE / real", fill="white")
-    draw.text((172, 3), "Predicted RAM", fill="white")
-    draw.text((172, 15), args.mode, fill="white")
-    return frame.resize((656, 476), Image.Resampling.NEAREST)
+    draw.text((4, 3), 'ALE / real', fill='white')
+    draw.text((width + 12, 3), 'Predicted RAM', fill='white')
+    draw.text((width + 12, 15), args.mode, fill='white')
+    return frame.resize((frame.width * 2, frame.height * 2), Image.Resampling.NEAREST)
 
 
 def _latent_frame(real, observation, runtime, reward, step, args):
@@ -40,29 +42,31 @@ def _latent_frame(real, observation, runtime, reward, step, args):
 @torch.no_grad()
 def gif(args):
     from .latent_model import load_checkpoint, is_latent_checkpoint, LatentModel
-    from .envs.pixels import PixelPongEnv
 
     ckpt = load_checkpoint(args.ckpt)
     latent = is_latent_checkpoint(ckpt)
+    args.environment = environment_spec(args, ckpt)
     if latent:
         model = LatentModel.load(ckpt, args.device).eval()
         adapter = LatentAdapter(model, torch.Generator().manual_seed(args.seed))
     else:
         adapter = MLPAdapter(StateMLP.load(args.ckpt, args.device))
     runtime = WorldRuntime(adapter)
-    env = PixelPongEnv() if latent else PongEnv(render_mode='rgb_array')
+    env = make_env(args.environment, latent, render_mode='rgb_array')
     rng = np.random.default_rng(args.seed)
     frames = []
     try:
+        if env.action_space.n != adapter.model.num_actions:
+            raise ValueError("Checkpoint action count does not match environment.")
         state, _ = env.reset(seed=args.seed)
         for _ in range(30):
-            state, _, done, truncated, _ = env.step(1)
+            state, _, done, truncated, _ = env.step(startup_action(env))
             if done or truncated:
                 raise ValueError('Episode ended during warm-up.')
         if latent:
             images, actions = [env.frame()], []
             for _ in range(args.history-1):
-                action = int(rng.integers(6))
+                action = int(rng.integers(env.action_space.n))
                 _, _, done, truncated, _ = env.step(action)
                 if done or truncated:
                     raise ValueError('Episode ended during history initialization; use a shorter history.')
@@ -74,7 +78,7 @@ def gif(args):
             context = {'observations': state[None, None]}
         runtime.reset(context)
         for step in range(200):
-            action = int(rng.integers(6))
+            action = int(rng.integers(env.action_space.n))
             state, reward, done, truncated, _ = env.step(action)
             observation = runtime.step([action])
             if latent:

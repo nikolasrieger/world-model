@@ -1,4 +1,8 @@
 command: train
+# null inherits checkpoint metadata, or legacy Pong defaults for a new run.
+env_id: null
+image_size: null
+full_action_space: null
 device: cpu
 seed: 0
 num_threads: 1

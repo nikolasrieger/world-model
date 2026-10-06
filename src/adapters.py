@@ -2,14 +2,14 @@ from typing import Protocol
 import torch
 
 
-def check_action(action, batch_size):
-    if action.shape != (batch_size,) or ((action < 0) | (action >= 6) | (action != action.long())).any():
-        raise ValueError('Expected one ALE action (0..5) per batch element.')
+def check_action(action, batch_size, num_actions):
+    if action.shape != (batch_size,) or ((action < 0) | (action >= num_actions) | (action != action.long())).any():
+        raise ValueError(f'Expected one integer action (0..{num_actions-1}) per batch element.')
 
 
-def check_history(obs):
-    if obs.ndim != 3 or obs.shape[1] < 1 or obs.shape[2] != 128:
-        raise ValueError('Expected RAM history [batch, time, 128].')
+def check_history(obs, observation_dim):
+    if obs.ndim != 3 or obs.shape[1] < 1 or obs.shape[2] != observation_dim:
+        raise ValueError(f'Expected history [batch, time, {observation_dim}].')
 
 
 def map_state(state, fn, strict=False):
@@ -56,12 +56,12 @@ class MLPAdapter:
 
     def initialize(self, context, noise=None):
         obs = torch.as_tensor(context['observations'], device=self.device, dtype=torch.float32)
-        check_history(obs)
+        check_history(obs, self.model.observation_dim)
         return {'ram': obs[:, -1].clone()}
 
     def step(self, state, action, noise=None):
         action = torch.as_tensor(action, device=self.device)
-        check_action(action, len(state['ram']))
+        check_action(action, len(state['ram']), self.model.num_actions)
         return {'ram': self.model(state['ram'], action).clamp(0, 1)}
 
     def observe(self, state):

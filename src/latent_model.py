@@ -200,8 +200,12 @@ class LatentModel(WorldModel):
     def __init__(self, config=None, device='cpu'):
         self.config = load_model_config('dreamerv3') if config is None else OmegaConf.create(config)
         self.config['device'] = str(device)
-        obs = SimpleNamespace(spaces={'image': SimpleNamespace(shape=(64, 64, 1))})
-        super().__init__(obs, SimpleNamespace(n=6), 0, self.config)
+        self.observation_shape = tuple(self.config.get('observation_shape', [1, 64, 64]))
+        self.config['observation_shape'] = list(self.observation_shape)
+        self.num_actions = self.config['num_actions']
+        channels, height, width = self.observation_shape
+        obs = SimpleNamespace(spaces={'image': SimpleNamespace(shape=(height, width, channels))})
+        super().__init__(obs, SimpleNamespace(n=self.num_actions), 0, self.config)
         self.to(device)
 
     def _apply(self, fn, recurse=True):
@@ -239,7 +243,7 @@ class LatentModel(WorldModel):
 
     def prior(self, state, action, noise=None, generator=None):
         action = torch.as_tensor(action, device=state['deter'].device)
-        check_action(action, len(state['deter']))
+        check_action(action, len(state['deter']), self.num_actions)
         controls = F.one_hot(action.long(), self.config['num_actions']).to(state['deter'])
         native_sample = noise is None and generator is None
         result = self.dynamics.img_step(state, controls, sample=native_sample)
@@ -255,21 +259,21 @@ class LatentModel(WorldModel):
 
     def posterior(self, state, image, noise=None, generator=None):
         image = torch.as_tensor(image, device=state['deter'].device, dtype=torch.float32)
-        if image.shape != (len(state['deter']), 1, 64, 64):
-            raise ValueError('Expected image [batch, 1, 64, 64].')
+        if image.shape != (len(state['deter']), *self.observation_shape):
+            raise ValueError(f'Expected image [batch, {self.observation_shape}].')
         embed = self.encoder({'image': image.permute(0, 2, 3, 1)})
         return self._posterior_embed(state['deter'], embed, noise, generator)
 
     def initialize(self, context, noise=None, generator=None):
         device = next(self.parameters()).device
         images = torch.as_tensor(context['observations'], device=device, dtype=torch.float32)
-        if images.ndim != 5 or images.shape[2:] != (1, 64, 64) or images.shape[1] < 1:
-            raise ValueError('Expected pixel history [batch, time, 1, 64, 64].')
+        if images.ndim != 5 or tuple(images.shape[2:]) != self.observation_shape or images.shape[1] < 1:
+            raise ValueError(f'Expected pixel history [batch, time, {self.observation_shape}].')
         batch, time = images.shape[:2]
         actions = torch.as_tensor(context.get('actions', torch.empty(batch, 0)), device=device)
         if actions.shape != (batch, time - 1):
             raise ValueError('Expected history actions [batch, time - 1].')
-        check_action(actions.reshape(-1), batch * (time - 1))
+        check_action(actions.reshape(-1), batch * (time - 1), self.num_actions)
         if noise is not None and noise.shape != (batch, time, self.latent):
             raise ValueError('Expected Gumbel noise [batch, time, stoch * classes].')
         embeds = self.encoder({'image': images.permute(0, 1, 3, 4, 2)})

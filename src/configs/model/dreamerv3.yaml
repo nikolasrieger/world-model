@@ -63,3 +63,6 @@ dyn_scale: 0.5
 rep_scale: 0.1
 batch_size: 16
 batch_length: 50
+
+# Standalone constructor default; training derives this from preprocessing.
+observation_shape: [1, 64, 64]

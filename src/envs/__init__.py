@@ -1,3 +1,3 @@
-from .pong import PongEnv
+from .atari import make_env, environment_spec
 
-__all__ = ["PongEnv"]
+__all__ = ["make_env", "environment_spec"]

@@ -2,3 +2,7 @@ name: mlp
 hidden: 64
 learning_rate: 0.001
 batch_size: 256
+
+# Standalone constructor defaults; training derives these from the environment.
+observation_shape: [128]
+num_actions: 6

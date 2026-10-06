@@ -8,41 +8,33 @@ from src.adapters import MLPAdapter, LatentAdapter
 from src.mlp_model import StateMLP
 from src.latent_model import LatentModel, load_checkpoint, is_latent_checkpoint
 from src.runtime import WorldRuntime
+from src.envs.atari import environment_spec, make_env, startup_action, readiness_check
 
 
-def collect_context(env, *, seed, history, latent, warmup=30, max_steps=300):
+def collect_context(env, *, seed, history, latent, ready, warmup=30, max_steps=300):
     env.reset(seed=seed)
-    base = env.env if latent else env
+    initial_action = startup_action(env)
     images = deque(maxlen=history)
-    previous_ball = None
-    moving = False
     for step in range(1, max_steps + 1):
-        observation, _, done, truncated, _ = env.step(1)
+        observation, _, done, truncated, _ = env.step(initial_action)
         if done or truncated:
-            raise RuntimeError('Episode ended before active-rally context was collected.')
-        ram = base.unwrapped.ale.getRAM().astype(int)
-        left, right = ram[50] - 15, ram[51] - 13
-        ball = (ram[49] - 49, ram[54] - 14)
-        visible = (20 <= left <= 193 and 20 <= right <= 193
-                   and 0 < ball[0] < 160 and 34 <= ball[1] <= 193)
-        if step < warmup or not visible:
+            raise RuntimeError('Episode ended before initialization context was collected.')
+        if step < warmup or not ready(env):
             images.clear()
-            previous_ball = None
-            moving = False
             continue
-        moving = moving or (previous_ball is not None and ball != previous_ball)
-        previous_ball = ball
         images.append(env.frame().float()/255 if latent else torch.as_tensor(observation).clone())
-        if len(images) == history and moving:
+        if len(images) == history:
             return dict(observations=torch.stack(list(images))[None],
-                        actions=torch.ones((1, history - 1), dtype=torch.long)), step
-    raise RuntimeError(f'No visible moving rally with {history} context frames within {max_steps} steps.')
+                        actions=torch.full((1, history - 1), initial_action, dtype=torch.long)), step
+    raise RuntimeError(f'No suitable context with {history} context frames within {max_steps} steps.')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ckpt', required=True)
     parser.add_argument('--device', default='cpu')
+    parser.add_argument('--env-id', default=None)
+    parser.add_argument('--actions', nargs=2, type=int, default=None, help='Repeated actions for the two branches.')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--horizon', type=int, default=10)
     parser.add_argument('--history', type=int, default=4)
@@ -53,25 +45,28 @@ def main():
     torch.set_num_threads(1)
     checkpoint = load_checkpoint(args.ckpt)
     latent = is_latent_checkpoint(checkpoint)
+    spec = environment_spec(args, checkpoint)
     if latent:
-        from src.envs.pixels import PixelPongEnv
-        env = PixelPongEnv()
         adapter = LatentAdapter(LatentModel.load(checkpoint, args.device).eval(),
                                 torch.Generator().manual_seed(args.seed))
     else:
-        from src.envs import PongEnv
-        env = PongEnv()
         adapter = MLPAdapter(StateMLP.load(args.ckpt, args.device))
+    env = make_env(spec, latent)
     try:
+        if env.action_space.n != adapter.model.num_actions:
+            raise ValueError("Checkpoint action count does not match environment.")
         context, initialization_steps = collect_context(
-            env, seed=args.seed, history=args.history, latent=latent)
-        print(f'Collected {args.history} active-rally frames after {initialization_steps} simulator steps.')
+            env, seed=args.seed, history=args.history, latent=latent, ready=readiness_check(spec))
+        print(f'Collected {args.history} initialization frames after {initialization_steps} simulator steps.')
         runtime = WorldRuntime(adapter)
         runtime.reset(context)
     finally:
         env.close()
     saved = runtime.snapshot()
-    actions = np.stack([np.ones(args.horizon, dtype=np.int64), np.full(args.horizon, 3, dtype=np.int64)])
+    branch_actions = args.actions or [0, adapter.model.num_actions - 1]
+    if any(a < 0 or a >= adapter.model.num_actions for a in branch_actions):
+        parser.error('Branch actions must be in the model action space.')
+    actions = np.stack([np.full(args.horizon, a, dtype=np.int64) for a in branch_actions])
     children = [runtime.branch(), runtime.branch()]
 
     def rollout(child, sequence):
@@ -85,7 +80,7 @@ def main():
     np.savez(output, context=context['observations'].numpy(), history_actions=context['actions'].numpy(),
              actions=actions, predictions=torch.stack(predictions).numpy(), seed=args.seed,
              checkpoint=str(Path(args.ckpt).resolve()), device=args.device, horizon=args.horizon,
-             initialization_steps=initialization_steps,
+             initialization_steps=initialization_steps, environment_id=spec["id"],
              prediction_kind='predicted grayscale pixels' if latent else 'predicted normalized RAM')
     print(f'Saved predictions to {output}; snapshot replay passed.')
 
