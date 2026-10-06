@@ -5,7 +5,6 @@ import numpy as np
 import torch
 
 gym.register_envs(ale_py)
-LEGACY_ENV = 'ALE/Pong-v5'
 RAM_CONFIG = dict(obs_type='ram', frameskip=4, repeat_action_probability=0., full_action_space=False)
 PIXEL_CONFIG = dict(preprocessing='atari-maxpool-v1', frameskip=4, size=64,
                     grayscale=True, noop_max=30, repeat_action_probability=.25,
@@ -13,7 +12,7 @@ PIXEL_CONFIG = dict(preprocessing='atari-maxpool-v1', frameskip=4, size=64,
 
 
 def environment_spec(args=None, checkpoint=None):
-    spec = dict(id=LEGACY_ENV, image_size=64, full_action_space=False)
+    spec = dict(id='ALE/Pong-v5', image_size=64, full_action_space=False)
     spec.update((checkpoint or {}).get('environment', {}))
     for key, arg in [('id', 'env_id'), ('image_size', 'image_size'), ('full_action_space', 'full_action_space')]:
         value = getattr(args, arg, None)
@@ -83,27 +82,29 @@ def startup_action(env):
 
 
 def validate_metadata(data, spec):
-    actual = data.get('environment', dict(id=LEGACY_ENV, image_size=64, full_action_space=False))
-    if actual != spec:
-        raise ValueError('Dataset environment/preprocessing differs from requested environment.')
+    actual = data.get('environment', dict(id='ALE/Pong-v5', image_size=64, full_action_space=False))
+    assert actual == spec, 'Dataset environment/preprocessing differs from requested environment.'
 
 
 def object_metrics(spec):
-    if spec['id'] == LEGACY_ENV:
+    if spec['id'] == 'ALE/Pong-v5':
         from .pong import ram_metrics
         return ram_metrics
     return None
 
 
 def readiness_check(spec):
-    if spec['id'] == LEGACY_ENV:
+    if spec['id'] == 'ALE/Pong-v5':
         from .pong import RallyReadiness
         return RallyReadiness()
     return lambda env: True
 
 
 def ram_renderer(spec):
-    if spec['id'] == LEGACY_ENV:
+    if spec['id'] == 'ALE/Breakout-v5':
+        from .breakout import ram_image
+        return ram_image
+    if spec['id'] == 'ALE/Pong-v5':
         from .pong import ram_image
         return ram_image
     from PIL import Image
