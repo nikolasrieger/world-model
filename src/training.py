@@ -208,7 +208,6 @@ class MLPTraining:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config['learning_rate'])
         if 'opt' in self.ckpt:
             self.optimizer.load_state_dict(self.ckpt['opt'])
-        self.resume_order = not args.collect_more and self.ckpt.get('horizon') == args.horizon
         print(f'MLP: {len(self.data[0])} transitions / {self.count} training sequences; '
               f'{len(self.val[3])} validation sequences; horizon={args.horizon}.', flush=True)
 
@@ -285,14 +284,6 @@ def train(args):
     epoch, step = ckpt.get('epoch', 0), ckpt.get('step', 0)
     shuffle = torch.Generator().manual_seed(args.seed+1) if trainer.drop_last else None
     order, offset = None, 0
-    if trainer.resume_order and ckpt.get('order') is not None:
-        order, offset = ckpt['order'], ckpt['offset']
-        if len(order) != trainer.count or not 0 <= offset <= len(order):
-            raise ValueError('Saved data cursor does not match the training windows.')
-        if shuffle is not None:
-            shuffle.set_state(ckpt['shuffle_rng'])
-    elif ckpt.get('order') is not None:
-        print('Training window layout changed; starting a new data permutation.', flush=True)
     cpu_rng = ckpt.get('cpu_rng', ckpt.get('rng_state'))
     if cpu_rng is not None:
         torch.set_rng_state(cpu_rng)
@@ -307,9 +298,7 @@ def train(args):
         payload.update(model_type=args.model, weights=trainer.model.state_dict(),
                        step=step, epoch=epoch, batch_size=args.batch_size, data=str(args.data), metrics=metrics,
                        cpu_rng=torch.get_rng_state(),
-                       mps_rng=torch.mps.get_rng_state() if torch.device(args.device).type == 'mps' else None,
-                       order=order, offset=offset,
-                       shuffle_rng=shuffle.get_state() if shuffle is not None else None)
+                       mps_rng=torch.mps.get_rng_state() if torch.device(args.device).type == 'mps' else None)
         if isinstance(args, DictConfig):
             payload['run_config'] = OmegaConf.to_container(args, resolve=True)
         save_file(payload, output)
